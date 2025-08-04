@@ -18,6 +18,16 @@ type MemTable struct {
 	data map[string]Value
 }
 
+func (mt *MemTable) GetRaw(param any) (Value, bool) {
+	panic("unimplemented")
+	return Value{}, false
+}
+
+func (mt *MemTable) SortedKeys() []string {
+	panic("unimplemented")
+	return nil
+}
+
 // NewMemTable creates a new MemTable instance
 func NewMemTable() *MemTable {
 	return &MemTable{

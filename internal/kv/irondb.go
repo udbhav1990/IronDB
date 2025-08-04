@@ -1,49 +1,83 @@
 package kv
 
 import (
-	"log"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 )
 
 type IronDB struct {
-	memTable   *MemTable     // In-memory sorted map
-	wal        *WAL          // Write-ahead log for durability
-	sstables   []*SSTable    // Immutable on-disk files
-	mu         sync.RWMutex  // Protect concurrent access
-	dataDir    string        // Path to store WAL and SSTables
-	compactCh  chan struct{} // Trigger compaction
-	shutdownCh chan struct{} // Graceful shutdown
+	memTable  *MemTable
+	wal       *WAL
+	sstables  []*SSTable // newest to oldest
+	dataDir   string
+	nextSSTID int
+	compactCh chan struct{}
+	//consistency ConsistencyLevel
+
+	mu         sync.RWMutex
+	flushLimit int // max entries before flush
 }
 
-func NewIronDB(dataDir string) *IronDB {
+func NewIronDB(dataDir string) (*IronDB, error) {
+	os.MkdirAll(dataDir, 0755)
 
-	// Load existing SSTables
-	files, err := os.ReadDir(dataDir)
+	wal, err := NewWAL(filepath.Join(dataDir, "wal.log"))
 	if err != nil {
-		log.Fatalf("Failed to read data directory: %v", err)
+		return nil, err
 	}
 
-	sstables := make([]*SSTable, 0)
-	for _, file := range files {
-		if strings.HasSuffix(file.Name(), ".sst") {
-			sstable, err := NewSSTable(filepath.Join(dataDir, file.Name()))
-			if err != nil {
-				log.Fatalf("Failed to load SSTable: %v", err)
-			}
-			sstables = append(sstables, sstable)
+	mem := NewMemTable()
+
+	// Replay WAL into MemTable
+	err = wal.Replay(func(op byte, key, value []byte) {
+		if op == OpPut {
+			mem.Put(string(key), string(value))
+		} else if op == OpDelete {
+			mem.Delete(string(key))
 		}
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Load existing SSTables (optional for now)
+	var ssts []*SSTable
+	files, _ := filepath.Glob(filepath.Join(dataDir, "sst_*.db"))
+	for _, file := range files {
+		sst, _ := LoadSSTable(file)
+		ssts = append(ssts, sst)
 	}
 
 	return &IronDB{
-		//memTable:  NewMemTable(),
-		//wal:       NewWAL(dataDir),
-		sstables:  sstables,
-		mu:        sync.RWMutex{},
+		memTable:  mem,
+		wal:       wal,
+		sstables:  ssts,
 		dataDir:   dataDir,
-		compactCh: make(chan struct{}),
+		nextSSTID: len(ssts),
+		//consistency: consistency,
+		flushLimit: 1000,
+	}, nil
+}
+
+// Put adds or updates a key-value pair in the IronDB
+func (db *IronDB) Put(key, value string) error {
+	// First Write to wal and then to memtable
+	if err := db.wal.WritePut([]byte(key), []byte(value)); err != nil {
+		return err
+	} else {
+		db.mu.Lock()
+		defer db.mu.Unlock()
+		// Write to memtable
+		db.memTable.Put(key, value)
 	}
 
+	if len(db.memTable.data) > 1000 { // Example threshold
+		select {
+		case db.compactCh <- struct{}{}:
+		default:
+			// Already compacting
+		}
+	}
+	return nil
 }

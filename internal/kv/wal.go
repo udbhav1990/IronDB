@@ -66,3 +66,43 @@ func (w *WAL) WriteDelete(key []byte) error {
 func (w *WAL) Close() error {
 	return w.file.Close()
 }
+
+func (w *WAL) Replay(callback func(op byte, key, value []byte)) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	_, err := w.file.Seek(0, 0)
+	if err != nil {
+		return err
+	}
+
+	buf := make([]byte, 1+4+4) // header
+	for {
+		_, err := w.file.Read(buf)
+		if err != nil {
+			break
+		}
+
+		op := buf[0]
+		keyLen := binary.BigEndian.Uint32(buf[1:5])
+		valLen := binary.BigEndian.Uint32(buf[5:9])
+
+		key := make([]byte, keyLen)
+		_, err = w.file.Read(key)
+		if err != nil {
+			break
+		}
+
+		var value []byte
+		if op == OpPut {
+			value = make([]byte, valLen)
+			_, err = w.file.Read(value)
+			if err != nil {
+				break
+			}
+		}
+
+		callback(op, key, value)
+	}
+	return nil
+}

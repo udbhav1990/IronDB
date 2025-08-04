@@ -11,10 +11,6 @@ type SSTable struct {
 	file     *os.File
 }
 
-func NewSSTable(filePath string) (*SSTable, error) {
-	return &SSTable{filePath: filePath}, nil
-}
-
 func CreateSSTableFromMemTable(mem *MemTable, filePath string) (*SSTable, error) {
 	f, err := os.Create(filePath)
 	if err != nil {
