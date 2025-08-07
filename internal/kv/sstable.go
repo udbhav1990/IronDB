@@ -3,12 +3,15 @@ package kv
 import (
 	"encoding/binary"
 	"os"
+
+	"github.com/bits-and-blooms/bloom/v3"
 )
 
 type SSTable struct {
 	FilePath string
 	index    map[string]int64 // key → byte offset in file
 	file     *os.File
+	filter   *bloom.BloomFilter
 }
 
 func CreateSSTableFromMemTable(mem *MemTable, filePath string) (*SSTable, error) {
@@ -18,6 +21,7 @@ func CreateSSTableFromMemTable(mem *MemTable, filePath string) (*SSTable, error)
 	}
 
 	index := make(map[string]int64)
+	filter := bloom.NewWithEstimates(100000, 0.01) // 100k items, 1% false positive rate
 
 	// Extract and sort keys
 	keys := mem.SortedKeys() // implement this helper
@@ -30,6 +34,7 @@ func CreateSSTableFromMemTable(mem *MemTable, filePath string) (*SSTable, error)
 		// Mark current offset
 		offset, _ := f.Seek(0, os.SEEK_CUR)
 		index[key] = offset
+		filter.Add([]byte(key))
 
 		// Write record: key length + value length + key + value
 		writeKV(f, key, val.Data)
@@ -42,10 +47,15 @@ func CreateSSTableFromMemTable(mem *MemTable, filePath string) (*SSTable, error)
 		FilePath: filePath,
 		index:    index,
 		file:     f,
+		filter:   filter,
 	}, nil
 }
 
 func (s *SSTable) Get(key string) (string, bool, error) {
+	if s.filter != nil && !s.filter.Test([]byte(key)) {
+		return "", false, nil
+	}
+
 	offset, ok := s.index[key]
 	if !ok {
 		return "", false, nil
@@ -107,6 +117,7 @@ func LoadSSTable(filePath string) (*SSTable, error) {
 	}
 
 	index := make(map[string]int64)
+	filter := bloom.NewWithEstimates(100000, 0.01)
 	offset := int64(0)
 
 	for {
@@ -124,6 +135,7 @@ func LoadSSTable(filePath string) (*SSTable, error) {
 		f.Read(val)
 
 		index[string(key)] = offset
+		filter.Add(key)
 		offsetNow, _ := f.Seek(0, os.SEEK_CUR)
 		offset = offsetNow
 	}
@@ -132,5 +144,13 @@ func LoadSSTable(filePath string) (*SSTable, error) {
 		FilePath: filePath,
 		index:    index,
 		file:     f,
+		filter:   filter,
 	}, nil
+}
+
+func (s *SSTable) Close() error {
+	if s.file != nil {
+		return s.file.Close()
+	}
+	return nil
 }

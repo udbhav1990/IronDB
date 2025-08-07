@@ -1,6 +1,7 @@
 package kv
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -31,9 +32,10 @@ func NewIronDB(dataDir string) (*IronDB, error) {
 
 	// Replay WAL into MemTable
 	err = wal.Replay(func(op byte, key, value []byte) {
-		if op == OpPut {
+		switch op {
+		case OpPut:
 			mem.Put(string(key), string(value))
-		} else if op == OpDelete {
+		case OpDelete:
 			mem.Delete(string(key))
 		}
 	})
@@ -63,7 +65,7 @@ func NewIronDB(dataDir string) (*IronDB, error) {
 // Put adds or updates a key-value pair in the IronDB
 func (db *IronDB) Put(key, value string) error {
 	// First Write to wal and then to memtable
-	if err := db.wal.WritePut([]byte(key), []byte(value)); err != nil {
+	if _, err := db.wal.WritePut([]byte(key), []byte(value)); err != nil {
 		return err
 	} else {
 		db.mu.Lock()
@@ -80,4 +82,100 @@ func (db *IronDB) Put(key, value string) error {
 		}
 	}
 	return nil
+}
+
+func (db *IronDB) Delete(key string) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	if _, err := db.wal.WriteDelete([]byte(key)); err != nil {
+		return err
+	}
+
+	db.memTable.Delete(key)
+
+	if db.memTable.Size() >= db.flushLimit {
+		return db.flushMemTable()
+	}
+	return nil
+}
+
+func (db *IronDB) Get(key string) (string, bool) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	// Check MemTable
+	if val, ok := db.memTable.Get(key); ok {
+		return val, true
+	}
+
+	// Check SSTables (newest to oldest)
+	for _, sst := range db.sstables {
+		if !sst.filter.Test([]byte(key)) {
+			continue
+		}
+		val, ok, _ := sst.Get(key)
+		if ok {
+			return val, true
+		}
+	}
+	return "", false
+}
+
+func (db *IronDB) ReadKeyRange(start, end string) map[string]string {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	result := db.memTable.Range(start, end)
+	for _, sst := range db.sstables {
+		sstData := sst.Range(start, end)
+		for k, v := range sstData {
+			if _, exists := result[k]; !exists {
+				result[k] = v
+			}
+		}
+	}
+	return result
+}
+
+func (db *IronDB) BatchPut(keys, values []string) error {
+	if len(keys) != len(values) {
+		return fmt.Errorf("key and value count mismatch")
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	for i := range keys {
+		db.wal.WritePut([]byte(keys[i]), []byte(values[i]))
+		db.memTable.Put(keys[i], values[i])
+	}
+
+	if db.memTable.Size() >= db.flushLimit {
+		return db.flushMemTable()
+	}
+	return nil
+}
+
+func (db *IronDB) flushMemTable() error {
+	sstFile := filepath.Join(db.dataDir, fmt.Sprintf("sst_%06d.db", db.nextSSTID))
+	sst, err := CreateSSTableFromMemTable(db.memTable, sstFile)
+	if err != nil {
+		return err
+	}
+	db.sstables = append([]*SSTable{sst}, db.sstables...)
+	db.memTable = NewMemTable()
+	db.nextSSTID++
+	_ = db.wal.Reset() // optional: rotate WAL here
+	return nil
+}
+
+func (db *IronDB) Close() error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	_ = db.flushMemTable()
+	for _, sst := range db.sstables {
+		sst.Close()
+	}
+	return db.wal.Close()
 }
