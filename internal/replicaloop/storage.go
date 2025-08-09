@@ -36,11 +36,16 @@ func (s *RaftStorage) AppendEntries(newEntries []raftpb.Entry) {
 	}
 }
 
-// InitialState returns current state (can be extended to persist hard state)
 func (s *RaftStorage) InitialState() (raftpb.HardState, raftpb.ConfState, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return raftpb.HardState{}, raftpb.ConfState{}, nil
+
+	return raftpb.HardState{
+			Term:   1,
+			Commit: 0, // very important: must be ≤ LastIndex()
+		}, raftpb.ConfState{
+			Voters: []uint64{1, 2}, // must match your cluster
+		}, nil
 }
 
 // Entries returns raft entries in [lo, hi)

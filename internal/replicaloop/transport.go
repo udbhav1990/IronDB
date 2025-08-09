@@ -1,3 +1,5 @@
+// --- Updated transport.go ---
+
 package replicaloop
 
 import (
@@ -7,21 +9,22 @@ import (
 	"log"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/golang/protobuf/proto"
 	"go.etcd.io/etcd/raft/v3/raftpb"
 )
 
 type TCPTransport struct {
-	id       uint64
-	address  string
-	peers    map[uint64]string    // peerID -> address
-	stepFunc func(raftpb.Message) // Raft's node.Step function
-	listener net.Listener
-	mu       sync.Mutex
+	id         uint64
+	address    string
+	peers      map[uint64]string    // peerID -> address
+	stepFunc   func(raftpb.Message) // Raft's node.Step function
+	listener   net.Listener
+	alivePeers map[uint64]bool
+	mu         sync.Mutex
 }
 
-// NewTCPTransport starts the TCP server and returns the transport
 func NewTCPTransport(id uint64, address string, peers map[uint64]string, stepFunc func(raftpb.Message)) (*TCPTransport, error) {
 	ln, err := net.Listen("tcp", address)
 	if err != nil {
@@ -29,19 +32,40 @@ func NewTCPTransport(id uint64, address string, peers map[uint64]string, stepFun
 	}
 
 	t := &TCPTransport{
-		id:       id,
-		address:  address,
-		peers:    peers,
-		stepFunc: stepFunc,
-		listener: ln,
+		id:         id,
+		address:    address,
+		peers:      peers,
+		stepFunc:   stepFunc,
+		listener:   ln,
+		alivePeers: make(map[uint64]bool),
 	}
 
 	go t.acceptLoop()
+	go t.monitorPeers()
 
 	return t, nil
 }
 
-// acceptLoop listens for incoming Raft messages
+func (t *TCPTransport) monitorPeers() {
+	for {
+		t.mu.Lock()
+		for id, addr := range t.peers {
+			if id == t.id {
+				continue
+			}
+			conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
+			if err != nil {
+				t.alivePeers[id] = false
+			} else {
+				t.alivePeers[id] = true
+				conn.Close()
+			}
+		}
+		t.mu.Unlock()
+		time.Sleep(2 * time.Second)
+	}
+}
+
 func (t *TCPTransport) acceptLoop() {
 	for {
 		conn, err := t.listener.Accept()
@@ -53,12 +77,10 @@ func (t *TCPTransport) acceptLoop() {
 	}
 }
 
-// handleConnection reads Raft messages from a TCP connection
 func (t *TCPTransport) handleConnection(conn net.Conn) {
 	defer conn.Close()
 
 	for {
-		// Read 4-byte length prefix
 		lenBuf := make([]byte, 4)
 		if _, err := io.ReadFull(conn, lenBuf); err != nil {
 			if err != io.EOF {
@@ -67,42 +89,39 @@ func (t *TCPTransport) handleConnection(conn net.Conn) {
 			return
 		}
 		msgLen := binary.BigEndian.Uint32(lenBuf)
-
-		// Read protobuf payload
 		data := make([]byte, msgLen)
 		if _, err := io.ReadFull(conn, data); err != nil {
 			log.Printf("transport: read data error: %v", err)
 			return
 		}
-
 		var msg raftpb.Message
 		if err := proto.Unmarshal(data, &msg); err != nil {
-			log.Printf("transport: failed to unmarshal raftpb.Message: %v", err)
+			log.Printf("transport: unmarshal error: %v", err)
 			return
 		}
-
-		// Deliver to raft
 		t.stepFunc(msg)
 	}
 }
 
-// Send sends raftpb.Messages to their respective peers
 func (t *TCPTransport) Send(msgs []raftpb.Message) {
 	for _, msg := range msgs {
-		addr, ok := t.peers[msg.To]
-		if !ok {
-			log.Printf("transport: peer %d not found", msg.To)
+		t.mu.Lock()
+		alive := t.alivePeers[msg.To]
+		addr := t.peers[msg.To]
+		t.mu.Unlock()
+
+		if !alive {
+			log.Printf("transport: peer %d not alive, skipping", msg.To)
 			continue
 		}
 		go t.sendOne(addr, msg)
 	}
 }
 
-// sendOne sends a single raftpb.Message to a peer
 func (t *TCPTransport) sendOne(addr string, msg raftpb.Message) {
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
-		log.Printf("transport: failed to dial %s: %v", addr, err)
+		log.Printf("transport: dial error to %s: %v", addr, err)
 		return
 	}
 	defer conn.Close()
@@ -113,10 +132,8 @@ func (t *TCPTransport) sendOne(addr string, msg raftpb.Message) {
 		return
 	}
 
-	// Write length-prefixed message
 	lenBuf := make([]byte, 4)
 	binary.BigEndian.PutUint32(lenBuf, uint32(len(data)))
-
 	if _, err := conn.Write(lenBuf); err != nil {
 		log.Printf("transport: write length error: %v", err)
 		return

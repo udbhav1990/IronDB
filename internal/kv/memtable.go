@@ -18,14 +18,25 @@ type MemTable struct {
 	data map[string]Value
 }
 
-func (mt *MemTable) GetRaw(param any) (Value, bool) {
-	panic("unimplemented")
-	return Value{}, false
+// GetRaw is what CreateSSTableFromMemTable uses.
+func (m *MemTable) GetRaw(key string) (Value, bool) {
+	m.mu.RLock()
+	v, ok := m.data[key]
+	m.mu.RUnlock()
+	return v, ok
 }
 
-func (mt *MemTable) SortedKeys() []string {
-	panic("unimplemented")
-	return nil
+// SortedKeys returns all keys currently present in the memtable,
+// regardless of tombstone. (SSTable writer decides to skip tombstones.)
+func (m *MemTable) SortedKeys() []string {
+	m.mu.RLock()
+	keys := make([]string, 0, len(m.data))
+	for k := range m.data {
+		keys = append(keys, k)
+	}
+	m.mu.RUnlock()
+	sort.Strings(keys)
+	return keys
 }
 
 // NewMemTable creates a new MemTable instance

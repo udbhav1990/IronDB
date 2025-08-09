@@ -3,6 +3,7 @@ package replicaloop
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/udbhav1990/IronDB/internal/kv"
@@ -55,28 +56,53 @@ func NewRaftNode(id uint64, wal *kv.WAL, db *kv.IronDB, peers []raft.Peer) *Raft
 	}
 }
 
-// Run starts the Raft loop (tick + ready processing)
-func (rn *RaftNode) Run() {
-	go rn.serveProposals()
+// Run is the main event loop of the Raft node
+func (r *RaftNode) Run(transport *TCPTransport) {
+	defer r.ticker.Stop()
 
 	for {
 		select {
-		case <-rn.ticker.C:
-			rn.node.Tick()
+		case <-r.ticker.C:
+			// Tick Raft (advances timeouts)
+			r.node.Tick()
 
-		case rd := <-rn.node.Ready():
-			// 1. Persist log entries
-			rn.storage.AppendEntries(rd.Entries)
+		case rd := <-r.node.Ready():
+			// Step 1: Persist to WAL
+			if err := r.wal.WriteReady(rd); err != nil {
+				log.Printf("error writing to WAL: %v", err)
+				continue
+			}
 
-			// 2. Apply committed entries to FSM
-			for _, ent := range rd.CommittedEntries {
-				if ent.Type == raftpb.EntryNormal && len(ent.Data) > 0 {
-					rn.fsm.Apply(ent)
+			// Step 3: Append new entries to storage
+			r.storage.AppendEntries(rd.Entries)
+
+			// Step 4: Send messages to peers
+			transport.Send(rd.Messages)
+
+			// Step 5: Apply committed entries to FSM (IronDB)
+			for _, entry := range rd.CommittedEntries {
+				switch entry.Type {
+				case raftpb.EntryNormal:
+					if len(entry.Data) > 0 {
+						if err := r.fsm.Apply(entry); err != nil {
+							log.Printf("fsm apply failed: %v", err)
+						}
+					}
+				case raftpb.EntryConfChange:
+					var cc raftpb.ConfChange
+					if err := cc.Unmarshal(entry.Data); err != nil {
+						log.Printf("conf change unmarshal failed: %v", err)
+						continue
+					}
+					r.node.ApplyConfChange(cc)
 				}
 			}
 
-			rn.node.Advance()
-		case <-rn.ctx.Done():
+			// Step 6: Advance the Raft node
+			r.node.Advance()
+
+		case <-r.ctx.Done():
+			log.Printf("RaftNode %d shutting down", r.id)
 			return
 		}
 	}
@@ -103,4 +129,8 @@ func (rn *RaftNode) Propose(cmd []byte) error {
 func (rn *RaftNode) Stop() {
 	rn.cancel()
 	rn.node.Stop()
+}
+
+func (r *RaftNode) Step(msg raftpb.Message) {
+	_ = r.node.Step(r.ctx, msg)
 }

@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"os"
 	"sync"
+
+	"go.etcd.io/etcd/raft/v3"
+	"go.etcd.io/etcd/raft/v3/raftpb"
 )
 
 const (
@@ -13,8 +16,9 @@ const (
 )
 
 type WAL struct {
-	file *os.File
-	mu   *sync.Mutex
+	file      *os.File
+	mu        *sync.Mutex
+	lastState raftpb.HardState
 }
 
 // ReadAt reads the value at a given byte offset in the WAL
@@ -172,5 +176,41 @@ func (w *WAL) Reset() error {
 	}
 
 	w.file = f
+	return nil
+}
+
+// WriteRawEntry writes raw raft entry data (you can extend this with op codes if needed)
+func (w *WAL) WriteRawEntry(data []byte) error {
+	length := make([]byte, 4)
+	binary.BigEndian.PutUint32(length, uint32(len(data)))
+
+	if _, err := w.file.Write(length); err != nil {
+		return err
+	}
+	_, err := w.file.Write(data)
+	return err
+}
+
+// WriteReady persists entries and hard state
+func (w *WAL) WriteReady(rd raft.Ready) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	// Persist HardState if non-empty
+	if !raft.IsEmptyHardState(rd.HardState) {
+		// Example: you might choose to serialize this to a separate file for durability
+		w.lastState = rd.HardState
+	}
+
+	// Write entries
+	for _, entry := range rd.Entries {
+		if entry.Type == raftpb.EntryNormal && len(entry.Data) > 0 {
+			if err := w.WriteRawEntry(entry.Data); err != nil {
+				return err
+			}
+		}
+	}
+
+	// Optional: Handle snapshot persistence here
 	return nil
 }

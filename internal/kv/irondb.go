@@ -20,18 +20,13 @@ type IronDB struct {
 	flushLimit int // max entries before flush
 }
 
-func NewIronDB(dataDir string) (*IronDB, error) {
+func NewIronDB(dataDir string, wal *WAL) (*IronDB, error) {
 	os.MkdirAll(dataDir, 0755)
-
-	wal, err := NewWAL(filepath.Join(dataDir, "wal.log"))
-	if err != nil {
-		return nil, err
-	}
 
 	mem := NewMemTable()
 
 	// Replay WAL into MemTable
-	err = wal.Replay(func(op byte, key, value []byte) {
+	err := wal.Replay(func(op byte, key, value []byte) {
 		switch op {
 		case OpPut:
 			mem.Put(string(key), string(value))
