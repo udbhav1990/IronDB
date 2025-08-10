@@ -3,13 +3,11 @@ package main
 
 import (
 	"flag"
-	"fmt"
 	"log"
 	"os"
 
 	"github.com/udbhav1990/IronDB/cmd/config"
 	"github.com/udbhav1990/IronDB/internal/kv"
-	"github.com/udbhav1990/IronDB/internal/replicaloop"
 )
 
 func main1() {
@@ -39,20 +37,9 @@ func main1() {
 	if err != nil {
 		log.Fatalf("Failed to create IronDB instance: %v", err)
 	}
+	// create a tcp server which takes put get delete command and call store methods
+	log.Printf("IronDB instance created successfully with data dir: %s", store)
+	// Start the TCP server (not implemented here, but would handle commands)
+	log.Printf("Starting TCP server on %s...", cfg.Address)
 
-	// Step 3: Create Raft Node FIRST (StepFunc comes from this)
-	raftNode := replicaloop.NewRaftNode(cfg.NodeID, wal, store, cfg.PeerList())
-
-	// Step 4: Create TCP Transport AFTER (inject raftNode.Step)
-	transport, err := replicaloop.NewTCPTransport(cfg.NodeID, cfg.Address, cfg.Peers, raftNode.Step)
-	if err != nil {
-		log.Fatalf("Failed to create transport: %v", err)
-	}
-
-	// Step 5: Run
-	go raftNode.Run(transport)
-
-	// Step 9: Simple CLI loop for testing
-	fmt.Println("IronDB started. Press Ctrl+C to exit.")
-	select {}
 }

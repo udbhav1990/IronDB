@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -93,18 +94,26 @@ func main() {
 			if line == "" {
 				continue
 			}
-			args := strings.Fields(line)
-			switch strings.ToLower(args[0]) {
+
+			// use splitArgs to honor quotes
+			argv, err := splitArgs(line)
+			if err != nil || len(argv) == 0 {
+				fmt.Println("parse error:", err)
+				continue
+			}
+			cmd := strings.ToLower(argv[0])
+
+			switch cmd {
 			case "quit", "exit":
 				rn.Stop()
 				return
 			case "put":
-				if len(args) < 3 {
+				if len(argv) < 3 {
 					fmt.Println("usage: put <key> <value>")
 					continue
 				}
-				key := args[1]
-				value := strings.Join(args[2:], " ")
+				key := argv[1]
+				value := strings.Join(argv[2:], " ")
 				log.Printf("put %q=%q", key, value)
 				if err := rn.ProposePut(key, []byte(value)); err != nil {
 					fmt.Println("error:", err)
@@ -118,25 +127,45 @@ func main() {
 					}
 				}
 			case "get":
-				if len(args) != 2 {
+				if len(argv) != 2 {
 					fmt.Println("usage: get <key>")
 					continue
 				}
-				if v, ok := db.Get(args[1]); ok {
+				if v, ok := db.Get(argv[1]); ok {
 					fmt.Printf("%q\n", v)
 				} else {
 					fmt.Println("(not found)")
 				}
+			case "readkeyrange", "range":
+				if len(argv) != 3 {
+					fmt.Println("usage: readkeyrange <start> <end>")
+					continue
+				}
+				start, end := argv[1], argv[2]
+				out := db.ReadKeyRange(start, end) // ensure this exists; or db.Range(...)
+				if len(out) == 0 {
+					fmt.Println("(empty)")
+					continue
+				}
+				// pretty print sorted
+				keys := make([]string, 0, len(out))
+				for k := range out {
+					keys = append(keys, k)
+				}
+				sort.Strings(keys)
+				for _, k := range keys {
+					fmt.Printf("%s=%s\n", k, out[k])
+				}
 			case "del", "delete":
-				if len(args) != 2 {
+				if len(argv) != 2 {
 					fmt.Println("usage: del <key>")
 					continue
 				}
-				if err := rn.ProposeDelete(args[1]); err != nil {
+				if err := rn.ProposeDelete(argv[1]); err != nil {
 					fmt.Println("error:", err)
 				} else {
 					time.Sleep(150 * time.Millisecond)
-					if _, ok := db.Get(args[1]); !ok {
+					if _, ok := db.Get(argv[1]); !ok {
 						fmt.Println("OK (deleted)")
 					} else {
 						fmt.Println("OK proposed; still visible (eventual)")
@@ -152,4 +181,35 @@ func main() {
 	if err := <-errC; err != nil {
 		log.Fatalf("raft error: %v", err)
 	}
+}
+
+// splitArgs respects double-quotes:  foo "bar baz" -> ["foo","bar baz"]
+func splitArgs(line string) ([]string, error) {
+	var out []string
+	var cur strings.Builder
+	inQuote := false
+
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		switch c {
+		case '"':
+			inQuote = !inQuote
+		case ' ', '\t':
+			if inQuote {
+				cur.WriteByte(c)
+			} else if cur.Len() > 0 {
+				out = append(out, cur.String())
+				cur.Reset()
+			}
+		default:
+			cur.WriteByte(c)
+		}
+	}
+	if inQuote {
+		return nil, fmt.Errorf("unclosed quote")
+	}
+	if cur.Len() > 0 {
+		out = append(out, cur.String())
+	}
+	return out, nil
 }

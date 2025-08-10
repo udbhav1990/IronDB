@@ -40,9 +40,6 @@ func CreateSSTableFromMemTable(mem *MemTable, filePath string) (*SSTable, error)
 		writeKV(f, key, val.Data)
 	}
 
-	// Write footer or save index elsewhere
-	// TODO: write index to a side file or inline footer
-
 	return &SSTable{
 		FilePath: filePath,
 		index:    index,
