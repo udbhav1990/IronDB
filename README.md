@@ -136,15 +136,6 @@ Example:
 readkeyrange a z
 ```
 
-### Batch put multiple key/value pairs
-```text
-batchput <k1> <v1> <k2> <v2> ...
-```
-Example:
-```text
-batchput a 1 b 2 "c key" "value 3"
-```
-
 ### Quit the node
 ```text
 quit
@@ -156,7 +147,7 @@ exit
 
 > Notes:
 > - Quoted arguments are supported if keys/values contain spaces, e.g. `put "user 1" "Alice A"`.
-> - Write operations (`put`, `del`, `batchput`) must be sent to the **leader** node. In **single-node** mode the node becomes leader automatically.
+> - Write operations (`put`, `del`) must be sent to the **leader** node. In **single-node** mode the node becomes leader automatically.
 
 ---
 
@@ -192,7 +183,6 @@ make node3
 
 From the **leader** node’s REPL:
 ```
-> batchput a 1 b 2 "c key" "value 3"
 > readkeyrange a z
 a=1
 b=2
